@@ -1,0 +1,177 @@
+To compete effectively in the LLM and CoPilot space, you need high-quality, real-world user prompts to understand user intent. The most reliable sources for these are open-source research datasets where user interactions have been crowdsourced and anonymized.
+
+Below is the research on reliable sources followed by the Python script to automate the retrieval, categorization, and updating of your Google Sheet.
+
+### **Part 1: Reliable Sources for User Prompts**
+
+These are the industry-standard datasets containing millions of real user prompts. The script below is designed to interface with these via the Hugging Face API, which is more stable and ethical than web scraping HTML.
+
+| Source Name | Description | Direct URL |
+| --- | --- | --- |
+| **LMSYS Chatbot Arena** | **(Gold Standard)** Contains 33k+ conversations where users battle-test different models. Excellent for finding challenging queries. | [Hugging Face Link](https://huggingface.co/datasets/lmsys/chatbot_arena_conversations) |
+| **WildChat (AllenAI)** | Over 1 million real-world user-ChatGPT interactions. Covers 68 languages and highly diverse user needs. | [Hugging Face Link](https://huggingface.co/datasets/allenai/WildChat) |
+| **ShareGPT** | A collection of conversations shared by users who used the "Share" feature on ChatGPT. Great for long-context prompts. | [Hugging Face Link](https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered) |
+| **OpenAssistant (OASST1)** | A fully crowdsourced, human-annotated dataset designed to train instructors. Highly clean data. | [Hugging Face Link](https://huggingface.co/datasets/OpenAssistant/oasst1) |
+
+---
+
+### **Part 2: The Script**
+
+This Python script performs the following actions:
+
+1. **Fetches** user prompts from the **LMSYS Chatbot Arena** dataset (streamed, so it doesn't download the whole file).
+2. **Deduplicates** them against your existing Google Sheet (ensuring mutual exclusivity).
+3. **Categorizes** the intent (using a keyword classifier, which you can swap for an LLM API call).
+4. **Appends** new unique prompts to the Sheet.
+
+#### **Prerequisites**
+
+1. **Google Cloud Project:** Enable the **Google Sheets API** and **Google Drive API**.
+2. **Service Account JSON:** Download your credentials JSON file (rename it to `credentials.json`).
+3. **Install Libraries:**
+```bash
+pip install gspread oauth2client pandas datasets
+
+```
+
+
+
+#### **Python Script (`prompt_harvester.py`)**
+
+```python
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+from datasets import load_dataset
+import pandas as pd
+import datetime
+import re
+
+# --- CONFIGURATION ---
+SPREADSHEET_NAME = "Daily User Prompts"  # Name of your Google Sheet
+SHEET_TAB_NAME = "Sheet1"                # Name of the tab/worksheet
+CREDENTIALS_FILE = "credentials.json"    # Your Google Cloud Service Account JSON
+BATCH_SIZE = 100                         # How many prompts to process per run
+
+# --- INTENT CLASSIFIER ---
+def categorize_intent(prompt):
+    """
+    Categorizes prompt intent based on keywords. 
+    UPGRADE: Replace this logic with a call to OpenAI/Gemini API for higher accuracy.
+    """
+    prompt_lower = prompt.lower()
+    
+    if any(x in prompt_lower for x in ['code', 'python', 'java', 'function', 'bug', 'error']):
+        return "Coding & Debugging"
+    elif any(x in prompt_lower for x in ['write', 'essay', 'poem', 'draft', 'email', 'blog']):
+        return "Creative Writing"
+    elif any(x in prompt_lower for x in ['explain', 'what is', 'how does', 'summary', 'summarize']):
+        return "Education & Knowledge"
+    elif any(x in prompt_lower for x in ['translate', 'translation', 'spanish', 'french']):
+        return "Translation"
+    elif any(x in prompt_lower for x in ['plan', 'schedule', 'itinerary', 'advice']):
+        return "Planning & Advice"
+    elif any(x in prompt_lower for x in ['image', 'draw', 'picture', 'photo']):
+        return "Image Generation"
+    else:
+        return "General/Chat"
+
+# --- MAIN SCRIPT ---
+def run_harvester():
+    print("🚀 Starting Prompt Harvester...")
+
+    # 1. Connect to Google Sheets
+    try:
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
+        client = gspread.authorize(creds)
+        sheet = client.open(SPREADSHEET_NAME).worksheet(SHEET_TAB_NAME)
+        
+        # Get existing data to ensure uniqueness
+        existing_data = sheet.get_all_records()
+        existing_prompts = set(row['Prompt'] for row in existing_data if 'Prompt' in row)
+        print(f"✅ Loaded {len(existing_prompts)} existing prompts from Google Sheet.")
+        
+    except Exception as e:
+        print(f"❌ Error connecting to Google Sheets: {e}")
+        return
+
+    # 2. Fetch Fresh Data from Hugging Face (LMSYS Dataset)
+    # We use streaming=True to avoid downloading the entire GBs of data
+    print("📥 Streaming data from LMSYS Chatbot Arena...")
+    dataset = load_dataset("lmsys/chatbot_arena_conversations", split="train", streaming=True)
+    
+    new_entries = []
+    
+    # Iterate through the dataset
+    count = 0
+    for record in dataset:
+        if count >= BATCH_SIZE:
+            break
+            
+        # Extract the user's first message (the prompt)
+        # The dataset structure is a list of messages; usually the first one is the user.
+        conversation = record.get('conversation_a', []) # Checking conversation A
+        if not conversation: 
+            continue
+            
+        user_prompt = conversation[0]['content']
+        
+        # 3. Deduplication Check
+        # We clean whitespace to ensure strict uniqueness
+        clean_prompt = user_prompt.strip()
+        
+        if clean_prompt not in existing_prompts and len(clean_prompt) > 10:
+            # 4. Categorize Intent
+            intent = categorize_intent(clean_prompt)
+            
+            # Prepare row
+            new_entries.append({
+                "Date Added": datetime.datetime.now().strftime("%Y-%m-%d"),
+                "Source": "LMSYS_Arena",
+                "Intent": intent,
+                "Prompt": clean_prompt,
+                "Language": record.get('language', 'unknown')
+            })
+            
+            # Add to local set to prevent duplicates within the same batch
+            existing_prompts.add(clean_prompt)
+            count += 1
+
+    # 5. Append to Google Sheet
+    if new_entries:
+        # Convert to DataFrame for easier handling (optional, but good for cleaning)
+        df = pd.DataFrame(new_entries)
+        
+        # Prepare list of lists for gspread
+        # Order: Date Added, Source, Intent, Prompt, Language
+        values_to_append = df[['Date Added', 'Source', 'Intent', 'Prompt', 'Language']].values.tolist()
+        
+        sheet.append_rows(values_to_append)
+        print(f"✅ Successfully appended {len(values_to_append)} new unique prompts to Google Sheet.")
+    else:
+        print("⚠️ No new unique prompts found in this batch.")
+
+if __name__ == "__main__":
+    run_harvester()
+
+```
+
+### **Part 3: Metadata Categorization Strategy**
+
+To make this data useful for your CoPilot, the spreadsheet columns should be structured as follows. The script above automatically populates these:
+
+| Column A | Column B | Column C | Column D | Column E |
+| --- | --- | --- | --- | --- |
+| **Date Added** | **Source** | **Intent (Metadata)** | **Prompt (The Data)** | **Language** |
+| 2024-05-21 | LMSYS_Arena | Coding & Debugging | "Write a python script to parse HTML..." | en |
+| 2024-05-21 | WildChat | Creative Writing | "Help me write a resignation letter..." | en |
+
+### **Next Steps for You**
+
+1. **Set up the Google Sheet:** Create a new sheet named "Daily User Prompts" with the header row: `Date Added`, `Source`, `Intent`, `Prompt`, `Language`.
+2. **Schedule the Script:** Use a simple cron job (Linux/Mac) or Task Scheduler (Windows) to run this script weekly.
+* *Example Cron (runs every Monday at 9am):* `0 9 * * 1 /usr/bin/python3 /path/to/prompt_harvester.py`
+
+
+
+Would you like me to refine the `categorize_intent` function to actually use the Gemini API (free tier) to give you much deeper categorization (e.g., "User wants to debug SQL code" vs just "Coding")?
