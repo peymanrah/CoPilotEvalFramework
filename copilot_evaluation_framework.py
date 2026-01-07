@@ -25,30 +25,33 @@ BATCH_SIZE_PER_SOURCE = 250  # Prompts per source
 TOTAL_TARGET = 1000  # Total target prompts
 
 # --- DATA SOURCE CONFIGURATIONS ---
+# Using publicly accessible datasets that don't require authentication
 DATA_SOURCES = {
-    "LMSYS_Arena": {
-        "dataset": "lmsys/chatbot_arena_conversations",
-        "description": "Gold standard - 33k+ battle-tested conversations",
-        "prompt_field": "conversation_a",
-        "is_conversation": True
-    },
-    "WildChat": {
-        "dataset": "allenai/WildChat",
-        "description": "1M+ real ChatGPT interactions, 68 languages",
-        "prompt_field": "conversation",
-        "is_conversation": True
-    },
-    "ShareGPT": {
-        "dataset": "anon8231489123/ShareGPT_Vicuna_unfiltered",
-        "description": "User-shared ChatGPT conversations",
-        "prompt_field": "conversations",
-        "is_conversation": True
-    },
     "OpenAssistant": {
         "dataset": "OpenAssistant/oasst1",
         "description": "Crowdsourced, human-annotated instruction data",
         "prompt_field": "text",
+        "is_conversation": False,
+        "filter_role": "prompter"
+    },
+    "Dolly": {
+        "dataset": "databricks/databricks-dolly-15k",
+        "description": "15k high-quality human-generated prompts by Databricks",
+        "prompt_field": "instruction",
         "is_conversation": False
+    },
+    "Alpaca": {
+        "dataset": "tatsu-lab/alpaca",
+        "description": "52k instruction-following data from Stanford",
+        "prompt_field": "instruction",
+        "is_conversation": False
+    },
+    "FLAN": {
+        "dataset": "Muennighoff/flan",
+        "description": "Google FLAN collection - diverse NLP tasks",
+        "prompt_field": "inputs",
+        "is_conversation": False,
+        "config": "cot_submix_original"
     }
 }
 
@@ -492,11 +495,26 @@ def extract_user_prompt(record: dict, source_config: dict) -> Optional[str]:
                 elif isinstance(first_msg, str):
                     return first_msg
         else:
-            # Direct text field (like OpenAssistant)
+            # Direct text field
             text = record.get(field, '')
+            
             # For OpenAssistant, filter to only prompter messages
-            if record.get('role') == 'prompter' or source_config.get('filter_role') is None:
-                return text
+            filter_role = source_config.get('filter_role')
+            if filter_role:
+                if record.get('role') != filter_role:
+                    return None
+            
+            # For Dolly/Alpaca, combine instruction with input context if available
+            if 'context' in record and record.get('context'):
+                context = record.get('context', '').strip()
+                if context and len(context) > 5:
+                    text = f"{text}\n\nContext: {context}"
+            elif 'input' in record and record.get('input'):
+                input_text = record.get('input', '').strip()
+                if input_text and len(input_text) > 5:
+                    text = f"{text}\n\nInput: {input_text}"
+            
+            return text
     except Exception as e:
         return None
     
@@ -515,12 +533,20 @@ def process_dataset(source_name: str, source_config: dict, batch_size: int) -> L
     
     try:
         # Load dataset with streaming to manage memory
-        dataset = load_dataset(
-            source_config['dataset'], 
-            split="train", 
-            streaming=True,
-            trust_remote_code=True
-        )
+        config_name = source_config.get('config')
+        if config_name:
+            dataset = load_dataset(
+                source_config['dataset'],
+                config_name,
+                split="train", 
+                streaming=True
+            )
+        else:
+            dataset = load_dataset(
+                source_config['dataset'], 
+                split="train", 
+                streaming=True
+            )
         
         count = 0
         skipped = 0
