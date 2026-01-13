@@ -5,7 +5,7 @@ A comprehensive framework for harvesting user prompts from multiple sources,
 categorizing them by intent, difficulty, and Microsoft product relevance,
 and providing an evaluation schema for comparing AI assistants.
 
-Author: Evaluation Framework Team
+Author: Peyman Rah
 Date: 2026-01-06
 """
 
